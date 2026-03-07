@@ -36,7 +36,17 @@ A dual-backend antenna comparison tool supporting [GQRX](https://gqrx.dk/) (any 
 - **GQRX** with Remote Control enabled (`Tools > Remote Control > Start`) for the `gqrx` backend
 - **hackrf_sweep** on `PATH` for the `hackrf` backend (part of [hackrf](https://github.com/greatscottgadgets/hackrf) tools)
 
-### Workflow
+### Interactive Mode
+
+Run with no arguments to launch an interactive menu that guides you through all options with arrow-key navigation:
+
+```bash
+uv run gqrx_sweep.py
+```
+
+### CLI Workflow
+
+You can also pass arguments directly for scripting or repeated use:
 
 ```bash
 # 1. Sweep a baseline (50-ohm terminator or reference antenna)

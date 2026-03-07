@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["matplotlib", "numpy", "rich"]
+# dependencies = ["matplotlib", "numpy", "questionary", "rich"]
 # ///
 """
 Antenna Sweep & Comparison Tool
@@ -1892,14 +1892,304 @@ def cmd_compare(args: argparse.Namespace) -> None:
         print_coverage_ranking(antenna_names, active_bands, ranking, antenna_p90, top_n, md_path)
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# Interactive menu (no-args mode)
+# ---------------------------------------------------------------------------
 
-    if args.command == "sweep":
+
+def _validate_frequency_input(value: str) -> bool | str:
+    """Questionary validator for frequency strings."""
+    try:
+        parse_frequency(value)
+        return True
+    except (ValueError, IndexError):
+        return "Invalid frequency (use K/M/G suffix, e.g. 88M, 1.5G, 500K)"
+
+
+def _validate_int(value: str) -> bool | str:
+    """Questionary validator for integer strings."""
+    try:
+        int(value)
+        return True
+    except ValueError:
+        return "Enter an integer"
+
+
+def _validate_positive_float(value: str) -> bool | str:
+    """Questionary validator for positive float strings."""
+    try:
+        if float(value) > 0:
+            return True
+        return "Must be positive"
+    except ValueError:
+        return "Enter a number"
+
+
+def _interactive_sweep(style) -> None:
+    """Guided sweep configuration wizard."""
+    import questionary
+
+    console.print()
+    console.rule("[bold]Sweep Configuration[/bold]")
+    console.print()
+
+    antenna = questionary.text(
+        "Antenna name:",
+        validate=lambda v: True if v.strip() else "Name cannot be empty",
+        style=style,
+    ).unsafe_ask()
+
+    backend = questionary.select(
+        "Backend:",
+        choices=[
+            questionary.Choice("GQRX — any radio via TCP remote control", value="gqrx"),
+            questionary.Choice("HackRF — fast wideband via hackrf_sweep", value="hackrf"),
+        ],
+        style=style,
+    ).unsafe_ask()
+
+    default_start = "1M" if backend == "hackrf" else "88M"
+    default_end = "6G" if backend == "hackrf" else "108M"
+
+    start = questionary.text(
+        "Start frequency:",
+        default=default_start,
+        validate=_validate_frequency_input,
+        style=style,
+    ).unsafe_ask()
+
+    end = questionary.text(
+        "End frequency:",
+        default=default_end,
+        validate=_validate_frequency_input,
+        style=style,
+    ).unsafe_ask()
+
+    args = argparse.Namespace(
+        antenna=antenna.strip(),
+        start=start,
+        end=end,
+        backend=backend,
+        host="127.0.0.1",
+        port=7356,
+        step="100K",
+        mode=None,
+        dwell=0.5,
+        samples=3,
+        lna_gain=16,
+        vga_gain=22,
+        bin_width=100_000,
+        amp=False,
+        sweeps=1,
+        baseline=None,
+        no_plot=False,
+    )
+
+    if backend == "gqrx":
+        args.host = questionary.text(
+            "GQRX host:", default="127.0.0.1", style=style,
+        ).unsafe_ask()
+
+        args.step = questionary.text(
+            "Step size:", default="100K",
+            validate=_validate_frequency_input, style=style,
+        ).unsafe_ask()
+
+        mode_choice = questionary.select(
+            "Demodulator mode:",
+            choices=[
+                questionary.Choice("(unchanged)", value=""),
+                "FM", "AM", "WFM", "USB", "LSB", "CW",
+            ],
+            style=style,
+        ).unsafe_ask()
+        args.mode = mode_choice if mode_choice else None
+
+        dwell_str = questionary.text(
+            "Dwell time (seconds):", default="0.5",
+            validate=_validate_positive_float, style=style,
+        ).unsafe_ask()
+        args.dwell = float(dwell_str)
+
+        samples_str = questionary.text(
+            "Samples per step:", default="3",
+            validate=_validate_int, style=style,
+        ).unsafe_ask()
+        args.samples = int(samples_str)
+
+    else:
+        sweeps_str = questionary.text(
+            "Number of sweeps to average:", default="1",
+            validate=_validate_int, style=style,
+        ).unsafe_ask()
+        args.sweeps = int(sweeps_str)
+
+        lna_str = questionary.text(
+            "LNA gain (0-40, 8dB steps):", default="16",
+            validate=_validate_int, style=style,
+        ).unsafe_ask()
+        args.lna_gain = int(lna_str)
+
+        vga_str = questionary.text(
+            "VGA gain (0-62, 2dB steps):", default="22",
+            validate=_validate_int, style=style,
+        ).unsafe_ask()
+        args.vga_gain = int(vga_str)
+
+        args.amp = questionary.confirm(
+            "Enable RF amplifier?", default=False, style=style,
+        ).unsafe_ask()
+
+    # Summary table
+    console.print()
+    summary = Table(title="Sweep Configuration", show_header=False)
+    summary.add_column("Setting", style="cyan")
+    summary.add_column("Value")
+    summary.add_row("Antenna", args.antenna)
+    summary.add_row("Backend", args.backend)
+    summary.add_row(
+        "Range",
+        f"{format_freq(parse_frequency(args.start))} → {format_freq(parse_frequency(args.end))}",
+    )
+    if args.backend == "gqrx":
+        summary.add_row("Host", f"{args.host}:{args.port}")
+        summary.add_row("Step", args.step)
+        if args.mode:
+            summary.add_row("Mode", args.mode)
+        summary.add_row("Dwell", f"{args.dwell}s")
+        summary.add_row("Samples/step", str(args.samples))
+    else:
+        summary.add_row("Sweeps", str(args.sweeps))
+        summary.add_row("LNA Gain", f"{args.lna_gain} dB")
+        summary.add_row("VGA Gain", f"{args.vga_gain} dB")
+        summary.add_row("Amplifier", "On" if args.amp else "Off")
+    if BASELINE_CSV.exists() and args.antenna.lower() != "baseline":
+        summary.add_row("Baseline", f"Auto ({BASELINE_CSV})")
+    console.print(summary)
+    console.print()
+
+    if questionary.confirm("Start sweep?", default=True, style=style).unsafe_ask():
+        console.print()
         cmd_sweep(args)
-    elif args.command == "compare":
+
+
+def _interactive_compare(style) -> None:
+    """Guided comparison wizard."""
+    import questionary
+
+    console.print()
+    console.rule("[bold]Compare Sweeps[/bold]")
+
+    csv_files = sorted(Path(".").glob("sweep_*.csv"))
+    if not csv_files:
+        console.print(
+            "\n[yellow]No sweep_*.csv files found in current directory.[/yellow]"
+        )
+        console.print("[dim]Run some sweeps first.[/dim]")
+        return
+
+    console.print(f"\nFound {len(csv_files)} sweep file(s):\n")
+    for f in csv_files:
+        meta, data = load_sweep_csv(f)
+        name = meta.get("antenna", f.stem)
+        console.print(f"  [cyan]{name}[/cyan] — {len(data)} points [dim]({f})[/dim]")
+
+    if BASELINE_CSV.exists():
+        _, baseline_points = load_sweep_csv(BASELINE_CSV)
+        console.print(
+            f"\n  [dim]Baseline: {BASELINE_CSV} ({len(baseline_points)} points)"
+            " — will be auto-subtracted[/dim]"
+        )
+
+    console.print()
+
+    top_n_str = questionary.text(
+        "Top-N for set-cover recommendation:",
+        default="3",
+        validate=_validate_int,
+        style=style,
+    ).unsafe_ask()
+
+    args = argparse.Namespace(
+        baseline=None,
+        output=None,
+        top_n=int(top_n_str),
+    )
+
+    console.print()
+    if questionary.confirm("Run comparison?", default=True, style=style).unsafe_ask():
+        console.print()
         cmd_compare(args)
+
+
+def interactive_menu() -> None:
+    """Interactive arrow-key menu when invoked with no arguments."""
+    try:
+        import questionary
+    except ImportError:
+        console.print(
+            "[red]questionary is required for interactive mode.[/red]\n"
+            "[dim]Install it (uv add questionary) or pass CLI arguments instead.[/dim]"
+        )
+        sys.exit(1)
+
+    style = questionary.Style(
+        [
+            ("qmark", "fg:cyan bold"),
+            ("question", "fg:white bold"),
+            ("answer", "fg:green bold"),
+            ("pointer", "fg:cyan bold"),
+            ("highlighted", "fg:cyan bold"),
+            ("selected", "fg:green"),
+        ]
+    )
+
+    console.print()
+    console.rule("[bold cyan]Antenna Sweep & Comparison Tool[/bold cyan]")
+    console.print(
+        "[dim]Arrow keys to navigate · Enter to select · Ctrl-C to exit[/dim]\n"
+    )
+
+    while True:
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Run antenna sweep", value="sweep"),
+                questionary.Choice("Compare sweep results", value="compare"),
+                questionary.Choice("Exit", value="exit"),
+            ],
+            style=style,
+        ).unsafe_ask()
+
+        if action == "exit":
+            break
+
+        if action == "sweep":
+            _interactive_sweep(style)
+        elif action == "compare":
+            _interactive_compare(style)
+
+        console.print()
+
+    console.print("\n[dim]Goodbye.[/dim]")
+
+
+def main() -> None:
+    try:
+        if len(sys.argv) == 1:
+            interactive_menu()
+            return
+
+        parser = build_parser()
+        args = parser.parse_args()
+
+        if args.command == "sweep":
+            cmd_sweep(args)
+        elif args.command == "compare":
+            cmd_compare(args)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
