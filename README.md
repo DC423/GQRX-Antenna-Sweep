@@ -1,123 +1,192 @@
-# GQRX Antenna Sweep
+# Antenna Sweep & Comparison Tool
 
-A Python tool that connects to [GQRX](https://gqrx.dk/)'s remote control socket and sweeps across a frequency range to figure out where your antenna performs best. Zero dependencies — just Python 3.6+ and a running GQRX instance.
+A dual-backend antenna comparison tool supporting [GQRX](https://gqrx.dk/) (any radio via TCP remote control) and `hackrf_sweep` (HackRF-specific fast sweeps). Sweeps spectrum, measures signal strength per frequency bin, optionally subtracts a baseline sweep to isolate antenna gain from ambient conditions, and compares multiple antennas with per-band statistical ranking.
 
 ## What It Does
 
-1. Connects to GQRX over TCP (Hamlib `rigctld` protocol)
-2. Tunes through your chosen frequency range step by step
-3. Takes multiple signal strength samples at each frequency and averages them
-4. Shows a real-time bar chart in the terminal as it sweeps
-5. Analyzes the data to find peak performance and optimal range
-6. Saves everything to CSV for further analysis
+1. **Sweep** -- Tunes through a frequency range, records power at each bin, saves CSV + PNG plot + markdown report
+2. **Baseline subtraction** -- Subtract a reference sweep (e.g. 50-ohm terminator) to isolate antenna gain from receiver noise floor
+3. **Compare** -- Loads all sweep CSVs in the current directory and produces:
+   - P90-based per-band ranking with activity detection
+   - Relative advantage table (each antenna vs group median)
+   - Diverging heatmap PNG for visual comparison
+   - Coverage ranking with greedy set-cover ("if you can only bring N antennas")
+   - Overlay plot with per-band recommendation panel
+
+## Screenshots
+
+### Single Antenna Sweep Plot
+
+![Sweep spectrum plot with band overlays](screenshots/graph.png)
+
+### Comparison Heatmap
+
+![Diverging heatmap of antenna advantage vs group median](screenshots/heatmap.png)
+
+### Compare Command Output
+
+![Terminal output showing ranking tables, coverage scoring, and set-cover recommendations](screenshots/running.png)
 
 ## Quick Start
 
 ### Prerequisites
 
-- **GQRX** running with Remote Control enabled:  
-  `Tools → Remote Control → Start`
-- **Python 3.6+** (stdlib only, nothing to `pip install`)
+- **Python 3.12+**
+- **[uv](https://docs.astral.sh/uv/)** (dependencies are declared inline via `uv` script headers -- no manual install needed)
+- **GQRX** with Remote Control enabled (`Tools > Remote Control > Start`) for the `gqrx` backend
+- **hackrf_sweep** on `PATH` for the `hackrf` backend (part of [hackrf](https://github.com/greatscottgadgets/hackrf) tools)
 
-### Basic Usage
+### Workflow
 
 ```bash
-python3 gqrx_sweep.py --host <GQRX_IP> --start <FROM> --end <TO> --step <SIZE>
+# 1. Sweep a baseline (50-ohm terminator or reference antenna)
+uv run gqrx_sweep.py sweep --antenna baseline --start 1M --end 6G --backend hackrf --sweeps 100
+
+# 2. Sweep each antenna under test
+uv run gqrx_sweep.py sweep --antenna "Diamond X-50" --start 1M --end 6G --backend hackrf --sweeps 100
+uv run gqrx_sweep.py sweep --antenna "Nagoya NA-771" --start 1M --end 6G --backend hackrf --sweeps 100
+
+# 3. Compare all sweeps
+uv run gqrx_sweep.py compare
+uv run gqrx_sweep.py compare --top-n 2
+```
+
+## Subcommands
+
+### `sweep` -- Run a single antenna sweep
+
+```bash
+uv run gqrx_sweep.py sweep --antenna <NAME> --start <FROM> --end <TO> [options]
 ```
 
 Frequencies accept suffixes: **K** (kHz), **M** (MHz), **G** (GHz)
 
-### Examples
+#### Common Options
 
-```bash
-# Sweep FM broadcast band on a remote Pi running GQRX
-python3 gqrx_sweep.py --host 192.168.1.50 --start 88M --end 108M --step 500K
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--antenna` | *required* | Name of the antenna under test |
+| `--start` | *required* | Start frequency (e.g. `88M`) |
+| `--end` | *required* | End frequency (e.g. `108M`) |
+| `--backend` | `gqrx` | Sweep backend: `gqrx` or `hackrf` |
+| `--baseline` | *auto* | Baseline CSV to subtract (auto-detects `baseline.csv` if present) |
+| `--no-plot` | off | Skip PNG plot generation |
 
-# 2-meter ham band, slower dwell for better accuracy
-python3 gqrx_sweep.py --start 144M --end 148M --step 100K --dwell 1.0
-
-# 70cm band, more samples, custom output file
-python3 gqrx_sweep.py --start 430M --end 440M --step 250K --samples 5 --output 70cm.csv
-
-# AM broadcast band sweep, skip CSV
-python3 gqrx_sweep.py --start 500K --end 1700K --step 50K --mode AM --no-save
-
-# Local GQRX, full RTL-SDR range scan (takes a while)
-python3 gqrx_sweep.py --start 24M --end 1.7G --step 10M --dwell 0.3
-```
-
-## CLI Options
+#### GQRX Backend Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--host` | `127.0.0.1` | GQRX IP address |
 | `--port` | `7356` | GQRX remote control port |
-| `--start` | *required* | Start frequency (e.g. `88M`) |
-| `--end` | *required* | End frequency (e.g. `108M`) |
-| `--step` | *required* | Step size (e.g. `500K`) |
+| `--step` | `100K` | Step size (e.g. `500K`) |
+| `--mode` | *unchanged* | Set demod mode: `FM` `AM` `WFM` `USB` `LSB` `CW` |
 | `--dwell` | `0.5` | Seconds to wait at each step before sampling |
 | `--samples` | `3` | Number of readings to average per step |
-| `--mode` | *unchanged* | Set demod mode: `FM` `AM` `WFM` `USB` `LSB` `CW` |
-| `--output` | auto | CSV filename (defaults to `antenna_sweep_YYYYMMDD_HHMMSS.csv`) |
-| `--no-save` | off | Skip saving CSV |
 
-## Sample Output
+#### HackRF Backend Options
 
-```
-============================================================
-  ANTENNA SWEEP
-  Range: 144.000 MHz -> 148.000 MHz
-  Step:  100.0 kHz  |  Steps: 41
-  Dwell: 0.5s  |  Samples/step: 3
-============================================================
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lna-gain` | `16` | LNA gain 0-40, 8 dB steps |
+| `--vga-gain` | `22` | VGA gain 0-62, 2 dB steps |
+| `--bin-width` | `100000` | Bin width in Hz |
+| `--amp` | off | Enable RF amplifier |
+| `--sweeps` | `1` | Number of passes to average (higher = less noise) |
 
-    144.000 MHz   -85.3 dBFS  █████████████████
-    144.100 MHz   -82.1 dBFS  ██████████████████
-    ...
-    146.500 MHz   -62.4 dBFS  ████████████████████████████
-    ...
+#### Sweep Examples
 
-[+] Sweep complete. 41 measurements taken.
+```bash
+# FM broadcast band via GQRX on a remote Pi
+uv run gqrx_sweep.py sweep --antenna "Whip" --host 192.168.1.50 --start 88M --end 108M --step 500K
 
-============================================================
-  ANTENNA ANALYSIS REPORT
-============================================================
-  Best frequency:    146.500 MHz (-62.4 dBFS)
-  Worst frequency:   148.000 MHz (-95.1 dBFS)
-  Average signal:    -79.8 dBFS
-  Good range:        145.800 MHz - 147.200 MHz
-  Threshold used:    -71.1 dBFS
-  Measurements:      41
-============================================================
-  Verdict: Antenna has a moderate preference for the good range.
-============================================================
+# 2-meter ham band, slower dwell for accuracy
+uv run gqrx_sweep.py sweep --antenna "Yagi" --start 144M --end 148M --step 100K --dwell 1.0
+
+# Full HackRF wideband sweep, 100 passes averaged
+uv run gqrx_sweep.py sweep --antenna "Discone" --start 1M --end 6G --backend hackrf --sweeps 100
 ```
 
-## CSV Output Format
+#### Sweep Output Files
+
+Each sweep produces:
+- `sweep_<name>_<timestamp>.csv` -- Raw frequency/power data with metadata header
+- `sweep_<name>_<timestamp>.png` -- Spectrum plot with band overlays and noise floor
+- `sweep_<name>_<timestamp>.md` -- Summary report with per-band metrics table
+
+Baseline sweeps (`--antenna baseline`) save as `baseline.csv` and are auto-detected by subsequent sweeps and comparisons.
+
+### `compare` -- Compare multiple antenna sweeps
+
+```bash
+uv run gqrx_sweep.py compare [options]
+```
+
+Auto-discovers all `sweep_*.csv` files in the current directory.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline` | *auto* | Baseline CSV for normalization (auto-detects `baseline.csv`) |
+| `--output` | auto | Output PNG filename (default: `comparison_<timestamp>.png`) |
+| `--top-n` | `3` | Number of antennas for set-cover recommendation |
+
+#### Compare Output Files
+
+- `comparison_<timestamp>.md` -- Per-band ranking, relative advantage table, coverage ranking
+- `comparison_<timestamp>.png` -- Overlay plot with per-band recommendation panel
+- `heatmap_<timestamp>.png` -- Diverging heatmap of dB advantage vs group median
+
+## How Analysis Works
+
+### Per-Band Scoring
+
+The tool knows about common frequency bands (VHF, FM Broadcast, Airband, VHF Marine, UHF, 70cm Ham, GSM 850/900/1800/1900, LoRa US/EU, WiFi 2.4/5 GHz, WiFi 6E, BLE) and scores each antenna within every band that overlaps the sweep range.
+
+**P90 (90th percentile power)** is the primary comparison metric -- it captures actual signal reception while ignoring noise-floor bins that dominate the mean.
+
+### Activity Detection
+
+Bands are marked "active" (worth comparing) when either:
+- **Within-band std >= 2.0 dB** -- spectral variation indicates real signals
+- **Between-antenna P90 spread >= 1.5 dB** -- antennas disagree, indicating real gain differences
+
+Inactive bands (pure noise floor) are dimmed in the output.
+
+### Coverage Ranking & Set-Cover
+
+Each antenna is scored across active bands:
+- **+2 points** per band within 1 dB of best (competitive)
+- **+1 point** per band within 3 dB of best (adequate)
+
+A greedy set-cover algorithm then answers: "if you can only bring N antennas, which ones cover the most bands?"
+
+## How It Works Under the Hood
+
+**GQRX backend** speaks the Hamlib `rigctld` protocol over TCP:
+- `F <hz>` -- Set frequency
+- `l STRENGTH` -- Read signal strength (dBFS)
+- `M <mode> <bw>` -- Set demodulator mode
+
+**HackRF backend** shells out to `hackrf_sweep` and parses its CSV output. Multiple passes (`--sweeps N`) are averaged per frequency bin to reduce noise.
+
+## CSV Format
 
 ```csv
-frequency_hz,frequency_readable,signal_dbfs
-144000000,144.000 MHz,-85.3
-144100000,144.100 MHz,-82.1
+# antenna: Diamond X-50
+# date: 2026-03-07T14:30:00
+# start_hz: 1000000
+# end_hz: 6000000000
+# backend: hackrf_sweep
+# noise_floor_dbm: -45.2
+frequency_hz,power_dbm
+1050000,-42.3
+1150000,-41.8
 ...
 ```
 
 ## Tips
 
-- **Dwell time matters** — Shorter dwell (`0.2s`) = faster sweep but noisier. Longer (`1-2s`) = slower but more accurate readings.
-- **More samples = smoother data** — `--samples 5` or higher helps in noisy environments.
-- **Step size tradeoff** — Smaller steps give finer resolution but take longer. Start coarse, then zoom into interesting ranges.
-- **Ctrl+C is safe** — The sweep can be interrupted at any time; you'll still get results for the frequencies already measured.
-
-## How It Works Under the Hood
-
-The tool speaks GQRX's remote control protocol (compatible with Hamlib `rigctld`):
-
-- `F <hz>` — Set frequency
-- `f` — Get frequency  
-- `l STRENGTH` — Read signal strength (dBFS)
-- `M <mode> <bw>` — Set demodulator mode
-
-All communication happens over a plain TCP socket on port 7356 (default).
-
-
+- **Baseline matters** -- Always sweep a 50-ohm terminator or reference antenna first. This lets you see actual antenna gain rather than ambient RF.
+- **More sweeps = cleaner data** -- For HackRF, `--sweeps 50-100` dramatically reduces noise. Single-pass data is noisy.
+- **Step size tradeoff** -- Smaller steps give finer resolution but take longer (GQRX backend). Start coarse, then zoom into interesting ranges.
+- **Ctrl+C is safe** -- Sweeps can be interrupted; you'll get results for frequencies already measured.
+- **Keep CSVs together** -- The `compare` command discovers all `sweep_*.csv` in the current directory. Organize antenna tests in per-session directories.
