@@ -676,20 +676,15 @@ def plot_comparison(
     output_path: Path,
     baseline_data: list[tuple[float, float]] | None = None,
     best_per_band: dict[str, str] | None = None,
+    normalized: bool = False,
+    antenna_means: dict[str, float] | None = None,
 ) -> None:
     """Generate a comparison overlay plot for multiple antennas.
 
     If best_per_band is provided, a recommendation panel is drawn below the plot.
+    If antenna_means is provided, each legend entry shows the mean dBm noise floor.
     """
-    # Show all active bands (exclude "--" which means no activity)
-    active_results: dict[str, str] = {}
-    if best_per_band:
-        active_results = {
-            band: ant for band, ant in best_per_band.items()
-            if ant != "--"
-        }
-
-    has_recommendations = len(active_results) > 0
+    has_recommendations = best_per_band is not None and len(best_per_band) > 0
     if has_recommendations:
         fig = plt.figure(figsize=(16, 9), layout="constrained")
         gs = fig.add_gridspec(2, 1, height_ratios=[4, 1], hspace=0.25)
@@ -707,14 +702,25 @@ def plot_comparison(
             baseline_powers = interpolate_baseline(data, baseline_data)
             powers = powers - baseline_powers
         color = colors[i % len(colors)]
-        ax.plot(freqs_mhz, powers, linewidth=0.9, label=name, color=color)
+        label = name
+        if antenna_means and name in antenna_means:
+            group_mean = sum(antenna_means.values()) / len(antenna_means)
+            delta = antenna_means[name] - group_mean
+            label = f"{name} ({delta:+.1f} dB)"
+        ax.plot(freqs_mhz, powers, linewidth=0.9, label=label, color=color)
+
+    if normalized:
+        ax.axhline(y=0, color="#FF5722", linestyle="--", linewidth=0.7, alpha=0.6, label="Antenna mean")
 
     ax.set_xlabel("Frequency (MHz)")
-    ax.set_ylabel(
-        "Power relative to baseline (dB)" if baseline_data else "Power (dBm)"
-    )
-    ax.set_title("Antenna Comparison")
-    ax.legend(loc="upper right")
+    if normalized:
+        ax.set_ylabel("Relative Power (dB)")
+    elif baseline_data:
+        ax.set_ylabel("Power relative to baseline (dB)")
+    else:
+        ax.set_ylabel("Power (dBm)")
+    ax.set_title("Antenna Comparison (self-normalized)" if normalized else "Antenna Comparison")
+    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
 
@@ -722,14 +728,15 @@ def plot_comparison(
     if all_freqs:
         _draw_band_overlays(ax, min(all_freqs), max(all_freqs))
 
-    # Recommendation panel (all active bands)
+    # Recommendation panel (all bands)
     if has_recommendations:
         ax_rec.axis("off")
         ax_rec.set_title(
-            "Best Antenna Per Active Band", fontsize=11, fontweight="bold", loc="left"
+            "Best Antenna Per Band", fontsize=11, fontweight="bold", loc="left"
         )
 
-        items = list(active_results.items())
+        band_start_freq = {name: start for name, start, _ in FREQUENCY_BANDS}
+        items = sorted(best_per_band.items(), key=lambda x: band_start_freq.get(x[0], 0))
         cols = 4
         n_rows = (len(items) + cols - 1) // cols
         for idx, (band, antenna) in enumerate(items):
@@ -868,6 +875,8 @@ def print_comparison_ranking(
     sweeps: list[tuple[str, dict[str, str], list[tuple[float, float]]]],
     baseline_data: list[tuple[float, float]] | None = None,
     markdown_path: Path | None = None,
+    normalized: bool = False,
+    quiet: bool = False,
 ) -> tuple[dict[str, str], dict[str, dict[str, float]], dict[str, dict[str, float]], list[str]]:
     """Print per-band ranking table comparing all antennas using P90 power.
 
@@ -983,13 +992,15 @@ def print_comparison_ranking(
         )
         return {}, antenna_p90, antenna_std, active_bands
 
-    # Build Rich table — antenna columns show P90 (dBm)
+    # Build Rich table — antenna columns show P90
+    p90_unit = "dB" if normalized else "dBm"
     table = Table(
-        title="Antenna Comparison -- P90 Power (dBm) Per Band",
+        title=f"Antenna Comparison -- P90 Relative Power ({p90_unit}) Per Band",
         caption=(
-            "P90 = 90th percentile power. Active = within-band std >= "
-            f"{BAND_ACTIVITY_STD_THRESHOLD_DB:.1f} dB OR P90 spread >= "
-            f"{BETWEEN_ANTENNA_SPREAD_THRESHOLD_DB:.1f} dB across antennas."
+            f"P90 = 90th percentile power ({p90_unit}). "
+            + ("Self-normalized (per-antenna mean subtracted). " if normalized else "")
+            + f"Active = within-band std >= {BAND_ACTIVITY_STD_THRESHOLD_DB:.1f} dB "
+            f"OR P90 spread >= {BETWEEN_ANTENNA_SPREAD_THRESHOLD_DB:.1f} dB across antennas."
         ),
     )
     table.add_column("Band", style="cyan")
@@ -1009,13 +1020,13 @@ def print_comparison_ranking(
             p90 = per_antenna.get(antenna_name)
             row.append(f"{p90:.1f}" if p90 is not None else "--")
 
+        best_per_band[band_name] = best_antenna
         if not is_active:
-            row.append("[dim]--[/dim]")
+            row.append(f"[dim]{best_antenna}[/dim]")
             row.append("[dim]--[/dim]")
             spread = band_p90_spread.get(band_name, 0.0)
             max_std = band_max_std.get(band_name, 0.0)
             row.append(f"[dim]no (std={max_std:.1f}, spread={spread:.1f})[/dim]")
-            best_per_band[band_name] = "--"
         else:
             # Find second-place antenna for context
             band_values = [
@@ -1034,25 +1045,24 @@ def print_comparison_ranking(
             if spread >= BETWEEN_ANTENNA_SPREAD_THRESHOLD_DB:
                 reasons.append(f"spread={spread:.1f}")
             row.append(f"[green]yes ({', '.join(reasons)})[/green]")
-            best_per_band[band_name] = best_antenna
         table.add_row(*row)
 
-    console.print(table)
-    console.print("\n[bold]Best antenna per active band:[/bold]")
-    for band, antenna in best_per_band.items():
-        if antenna == "--":
-            continue
-        console.print(
-            f"  [cyan]{band}[/cyan]: [green]{antenna}[/green]"
-        )
+    if not quiet:
+        console.print(table)
+        console.print("\n[bold]Best antenna per band:[/bold]")
+        for band, antenna in best_per_band.items():
+            console.print(
+                f"  [cyan]{band}[/cyan]: [green]{antenna}[/green]"
+            )
 
     # Save markdown
     if markdown_path is not None:
         md_lines = [
-            "# Antenna Comparison -- P90 Power (dBm) Per Band",
+            f"# Antenna Comparison -- P90 Relative Power ({p90_unit}) Per Band",
             "",
-            "_P90 = 90th percentile power. Captures signal peaks, ignores noise-floor bins._",
-            f"_Active = within-band std >= {BAND_ACTIVITY_STD_THRESHOLD_DB:.1f} dB"
+            f"_P90 = 90th percentile power ({p90_unit}). Captures signal peaks, ignores noise-floor bins._",
+            ("_Self-normalized: per-antenna mean subtracted to align noise floors._\n" if normalized else "")
+            + f"_Active = within-band std >= {BAND_ACTIVITY_STD_THRESHOLD_DB:.1f} dB"
             f" OR P90 spread >= {BETWEEN_ANTENNA_SPREAD_THRESHOLD_DB:.1f} dB across antennas._",
             "",
             "| Band | Start (MHz) | End (MHz) | "
@@ -1071,7 +1081,7 @@ def print_comparison_ranking(
             if not is_active:
                 spread = band_p90_spread.get(band_name, 0.0)
                 max_std = band_max_std.get(band_name, 0.0)
-                cells.extend(["--", "--", f"no (std={max_std:.1f}, spread={spread:.1f})"])
+                cells.extend([best_antenna, "--", f"no (std={max_std:.1f}, spread={spread:.1f})"])
             else:
                 band_values = [
                     (ant, per_antenna.get(ant))
@@ -1091,11 +1101,10 @@ def print_comparison_ranking(
                 cells.append(f"yes ({', '.join(md_reasons)})")
             md_lines.append("| " + " | ".join(cells) + " |")
         md_lines.append("")
-        md_lines.append("## Best Antenna Per Active Band")
+        md_lines.append("## Best Antenna Per Band")
         md_lines.append("")
         for band, antenna in best_per_band.items():
-            if antenna != "--":
-                md_lines.append(f"- **{band}**: {antenna}")
+            md_lines.append(f"- **{band}**: {antenna}")
         md_lines.append("")
         markdown_path.write_text("\n".join(md_lines))
         console.print(
@@ -1212,43 +1221,51 @@ def print_compare_all(
 
 def plot_heatmap(
     antenna_names: list[str],
-    active_bands: list[str],
-    advantage: dict[str, dict[str, float]],
+    bands: list[str],
+    values: dict[str, dict[str, float]],
     output_path: Path,
+    title: str = "Antenna Advantage vs Group Median (dB)",
+    colorbar_label: str = "dB advantage",
+    diverging: bool = True,
+    fmt: str = "+.1f",
 ) -> None:
-    """Generate a 2D heatmap: X=active bands, Y=antennas, cells=dB advantage."""
-    n_bands = len(active_bands)
+    """Generate a 2D heatmap: X=bands, Y=antennas."""
+    n_bands = len(bands)
     n_ants = len(antenna_names)
     if n_bands == 0 or n_ants == 0:
         return
 
     data = np.zeros((n_ants, n_bands))
-    for j, band in enumerate(active_bands):
+    for j, band in enumerate(bands):
         for i, ant in enumerate(antenna_names):
-            data[i, j] = advantage.get(ant, {}).get(band, 0.0)
+            data[i, j] = values.get(ant, {}).get(band, 0.0)
 
     fig, ax = plt.subplots(figsize=(max(10, n_bands * 0.9), max(4, n_ants * 0.7)))
-    abs_max = max(abs(data.min()), abs(data.max()), 1.0)
-    im = ax.imshow(
-        data, aspect="auto", cmap="RdYlGn",
-        vmin=-abs_max, vmax=abs_max,
-    )
+    if diverging:
+        abs_max = max(abs(data.min()), abs(data.max()), 1.0)
+        im = ax.imshow(
+            data, aspect="auto", cmap="RdYlGn",
+            vmin=-abs_max, vmax=abs_max,
+        )
+    else:
+        im = ax.imshow(data, aspect="auto", cmap="YlGn")
 
     ax.set_xticks(range(n_bands))
-    ax.set_xticklabels(active_bands, rotation=45, ha="right", fontsize=8)
+    ax.set_xticklabels(bands, rotation=45, ha="right", fontsize=8)
     ax.set_yticks(range(n_ants))
     ax.set_yticklabels(antenna_names, fontsize=9)
 
     # Annotate cells
+    abs_max_for_color = max(abs(data.min()), abs(data.max()), 1.0)
     for i in range(n_ants):
         for j in range(n_bands):
             val = data[i, j]
-            color = "black" if abs(val) < abs_max * 0.6 else "white"
-            ax.text(j, i, f"{val:+.1f}", ha="center", va="center",
+            color = "black" if abs(val) < abs_max_for_color * 0.6 else "white"
+            ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
                     fontsize=7, color=color, fontweight="bold")
 
-    ax.set_title("Antenna Advantage vs Group Median (dB)", fontsize=11)
-    fig.colorbar(im, ax=ax, label="dB advantage", shrink=0.8)
+    ax.set_title(title, fontsize=11)
+    fig.colorbar(im, ax=ax, label=colorbar_label, shrink=0.8)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -1862,11 +1879,28 @@ def cmd_compare(args: argparse.Namespace) -> None:
             f"  Baseline: [cyan]{baseline_source}[/cyan] ({len(baseline_data)} points)"
         )
 
-    # Print ranking + save markdown
+    # Compute raw P90 (before normalization) for the raw heatmap
+    _, raw_p90, _, _ = print_comparison_ranking(
+        sweeps, baseline_data, normalized=False, quiet=True,
+    )
+
+    # Self-normalize: subtract each antenna's mean so all share the same baseline
+    console.print("\n[bold]Self-normalizing (subtracting per-antenna mean):[/bold]")
+    antenna_means: dict[str, float] = {}
+    normalized_sweeps: list[tuple[str, dict[str, str], list[tuple[float, float]]]] = []
+    for name, meta, data in sweeps:
+        mean_power = sum(p for _, p in data) / len(data)
+        antenna_means[name] = mean_power
+        normalized_data = [(f, p - mean_power) for f, p in data]
+        normalized_sweeps.append((name, meta, normalized_data))
+        console.print(f"  [cyan]{name}[/cyan]: mean {mean_power:.1f} dBm subtracted")
+    sweeps = normalized_sweeps
+
+    # Print ranking + save markdown (normalized)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     md_path = Path(f"comparison_{timestamp}.md")
     best_per_band, antenna_p90, antenna_std, active_bands = print_comparison_ranking(
-        sweeps, baseline_data, markdown_path=md_path,
+        sweeps, baseline_data, markdown_path=md_path, normalized=True,
     )
 
     # Generate overlay plot with recommendation panel
@@ -1874,18 +1908,38 @@ def cmd_compare(args: argparse.Namespace) -> None:
     output_path = (
         Path(args.output) if args.output else Path(f"comparison_{timestamp}.png")
     )
-    plot_comparison(plot_sweeps, output_path, baseline_data, best_per_band=best_per_band)
+    plot_comparison(
+        plot_sweeps, output_path, baseline_data,
+        best_per_band=best_per_band, normalized=True, antenna_means=antenna_means,
+    )
     console.print(f"\n[green]Comparison plot saved: {output_path}[/green]")
 
-    # Relative advantage analysis (compare-all view)
+    # Relative advantage & heatmap — use ALL overlapping bands, sorted by frequency
     antenna_names = [name for name, _, _ in sweeps]
-    if active_bands and antenna_p90:
-        advantage = compute_relative_advantage(antenna_p90, active_bands)
-        print_compare_all(antenna_names, active_bands, advantage, antenna_std, md_path)
-        heatmap_path = Path(f"heatmap_{timestamp}.png")
-        plot_heatmap(antenna_names, active_bands, advantage, heatmap_path)
+    band_start_freq = {name: start for name, start, _ in FREQUENCY_BANDS}
+    all_bands = sorted(best_per_band.keys(), key=lambda b: band_start_freq.get(b, 0))
+    if all_bands and antenna_p90:
+        advantage = compute_relative_advantage(antenna_p90, all_bands)
+        print_compare_all(antenna_names, all_bands, advantage, antenna_std, md_path)
 
-    # Coverage ranking
+        # Raw heatmap — advantage from un-normalized absolute dBm P90
+        raw_advantage = compute_relative_advantage(raw_p90, all_bands)
+        heatmap_path = Path(f"heatmap_{timestamp}.png")
+        plot_heatmap(
+            antenna_names, all_bands, raw_advantage, heatmap_path,
+            title="Antenna Advantage vs Group Median — Raw (dBm)",
+            colorbar_label="dBm advantage",
+        )
+
+        # Normalized advantage heatmap
+        norm_heatmap_path = Path(f"normalized_heatmap_{timestamp}.png")
+        plot_heatmap(
+            antenna_names, all_bands, advantage, norm_heatmap_path,
+            title="Antenna Advantage vs Group Median — Normalized (dB)",
+            colorbar_label="dB advantage",
+        )
+
+    # Coverage ranking (still uses active_bands for scoring)
     if active_bands and antenna_p90:
         top_n = getattr(args, "top_n", 3)
         ranking = compute_coverage_ranking(antenna_p90, active_bands)
